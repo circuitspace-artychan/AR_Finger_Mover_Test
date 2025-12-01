@@ -3,8 +3,11 @@ using UnityEngine;
 public class GrabbableObject : MonoBehaviour
 {
     private Rigidbody rb;
-    private FixedJoint joint;
     private bool isGrabbed = false;
+    private Transform currentHand = null;   // the hand weï¿½re attached to
+
+    [Tooltip("Offset from the palm anchor when held (local space).")]
+    public Vector3 holdOffset = new Vector3(0f, 0f, 0.07f); // tweak in Inspector later
 
     private void Awake()
     {
@@ -13,25 +16,31 @@ public class GrabbableObject : MonoBehaviour
         {
             rb = gameObject.AddComponent<Rigidbody>();
         }
+
+        rb.useGravity = true;
+        rb.isKinematic = false;
+    }
+
+    private void Update()
+    {
+        // Manual release with Space
+        if (isGrabbed && Input.GetKeyDown(KeyCode.Space))
+        {
+            Debug.Log("Space pressed: releasing" + name);
+            DetachFromHand();
+        }
     }
 
     private void OnCollisionEnter(Collision collision)
     {
-        // Only respond if the colliding object has a "WhiteHand" (or similar)
+        // Only grab if not already grabbed, and we hit something whose name contains "Hand"
         if (!isGrabbed && collision.transform.name.Contains("Hand"))
         {
             AttachToHand(collision.transform);
         }
     }
 
-    private void OnCollisionExit(Collision collision)
-    {
-        // Release when the hand stops touching the object
-        if (isGrabbed && collision.transform.name.Contains("Hand"))
-        {
-            DetachFromHand();
-        }
-    }
+    // NOTE: no longer auto-release on collision exit; release is now via Space bar only.
 
     private void AttachToHand(Transform grabbedByHand)
     {
@@ -39,28 +48,24 @@ public class GrabbableObject : MonoBehaviour
             return;
 
         isGrabbed = true;
-        rb.useGravity = false;
-        rb.isKinematic = false; // joint will handle motion
-
-        // Add a FixedJoint to connect the object to the hand (or palm)
-        joint = gameObject.AddComponent<FixedJoint>();
+        currentHand = grabbedByHand;
 
         // Try to find the PalmAnchor child under the hand
         Transform palmAnchor = grabbedByHand.Find("PalmAnchor");
 
-        if (palmAnchor != null && palmAnchor.GetComponent<Rigidbody>() != null)
-        {
-            // Connect to the PalmAnchor’s Rigidbody
-            joint.connectedBody = palmAnchor.GetComponent<Rigidbody>();
-        }
-        else
-        {
-            // Fallback to the hand’s Rigidbody
-            joint.connectedBody = grabbedByHand.GetComponent<Rigidbody>();
-        }
+        // Disable physics while held
+        rb.useGravity = false;
+        rb.isKinematic = true;
+        rb.linearVelocity = Vector3.zero;
+        rb.angularVelocity = Vector3.zero;
 
-        joint.breakForce = Mathf.Infinity;
-        joint.breakTorque = Mathf.Infinity;
+        // Parent to palm (or to hand if no PalmAnchor)
+        Transform parent = palmAnchor != null ? palmAnchor : grabbedByHand;
+        transform.SetParent(parent);
+
+        // Snap into place relative to palm
+        transform.localPosition = holdOffset;
+        transform.localRotation = Quaternion.identity;
 
         Debug.Log($"{name} grabbed by {grabbedByHand.name}");
     }
@@ -71,14 +76,14 @@ public class GrabbableObject : MonoBehaviour
             return;
 
         isGrabbed = false;
-        rb.useGravity = true;
 
-        // Remove the joint safely
-        if (joint != null)
-        {
-            Destroy(joint);
-            joint = null;
-        }
+        // Unparent from hand
+        transform.SetParent(null);
+        currentHand = null;
+
+        // Re-enable physics
+        rb.isKinematic = false;
+        rb.useGravity = true;
 
         Debug.Log($"{name} released");
     }

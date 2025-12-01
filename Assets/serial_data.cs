@@ -54,12 +54,12 @@ public class serial_data : MonoBehaviour
 
     void Update()
     {
-        if (simulateInput)
-        {
-            UpdateSimulatedFingers();
-            ApplySimulatedRotation();
-            return;
-        }
+        //if (simulateInput)
+       // {
+            //UpdateSimulatedFingers();
+            //ApplySimulatedRotation();
+            //return;
+       // }
 
         if (data_stream.IsOpen)
         {
