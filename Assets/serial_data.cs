@@ -1,153 +1,196 @@
 using UnityEngine;
 using System.IO.Ports;
 using System.Text;
+using System.Globalization;
+
 
 public class serial_data : MonoBehaviour
 {
-    SerialPort data_stream = new SerialPort("COM6", 9600);
-    public string receivedstring;
+    SerialPort data_stream = new SerialPort("COM9", 9600)
+    {
+        ReadTimeout = 100,
+        WriteTimeout = 100,
+        Encoding = Encoding.ASCII,
+        NewLine = ";"
+    };
 
-    // References to finger bones in the new rig
-    public Transform thumb1;
-    public Transform thumb2;
+    // Scene refs
+    public GameObject index, indexTip;
+    public GameObject thumb, thumbTip;
+    public GameObject middle, middleTip;
+    public GameObject ring, ringTip;
+    public GameObject pinky, pinkyTip;
 
-    public Transform index2;
-    public Transform index3;
+    public float sensitivity = 1f;
 
-    public Transform middle2;
-    public Transform middle3;
-
-    public Transform ring2;
-    public Transform ring3;
-
-    public Transform little2;
-    public Transform little3;
-
-    public float sensitivity = 1;
-
-    private StringBuilder serialBuffer = new StringBuilder();
+    private readonly StringBuilder serialBuffer = new StringBuilder();
     private bool readingMessage = false;
 
-    // Simulation mode toggle
-    public bool simulateInput = true;
-    public float curlSpeed = 60f;
+    // throttle writes so we don't slam the Arduino each frame
+    private float lastSendTime;
+    public float minSendInterval = 0.03f; // ~30 Hz
 
-    // Simulated finger angles
-    private float simThumb = 0f;
-    private float simIndex = 0f;
-    private float simMiddle = 0f;
-    private float simRing = 0f;
-    private float simPinky = 0f;
-
-    public virtual void Start()
+    void Start()
     {
-        if (!simulateInput)
+        Debug.Log("start");
+        try
         {
-            data_stream.Open();
-            Debug.Log("Start (Serial Active)");
+            if (!data_stream.IsOpen)
+            {
+                data_stream.Open();
+                Debug.Log("Bluetooth/USB Serial Opened");
+                // Give Arduino time to reset after opening port (common on Uno/Leonardo)
+                System.Threading.Thread.Sleep(300);
+            }
         }
-        else
+        catch (System.Exception e)
         {
-            Debug.Log("Start (Simulation Mode)");
+            Debug.LogError("Failed to open serial port: " + e.Message);
         }
     }
 
     void Update()
     {
-        //if (simulateInput)
-       // {
-            //UpdateSimulatedFingers();
-            //ApplySimulatedRotation();
-            //return;
-       // }
+        if (!data_stream.IsOpen) return;
 
-        if (data_stream.IsOpen)
+        // READ: accumulate chars until we see '#' ... ';'
+        try
         {
-            try
+            string incomingData = data_stream.ReadExisting();
+            foreach (char ch in incomingData)
             {
-                while (data_stream.BytesToRead > 0)
+                if (ch == '#')
                 {
-                    char incomingChar = (char)data_stream.ReadChar();
-
-                    if (incomingChar == '#')
-                    {
-                        serialBuffer.Clear();
-                        readingMessage = true;
-                    }
-                    else if (incomingChar == ';' && readingMessage)
-                    {
-                        readingMessage = false;
-                        ProcessMessage(serialBuffer.ToString());
-                    }
-                    else if (readingMessage)
-                    {
-                        serialBuffer.Append(incomingChar);
-                    }
+                    serialBuffer.Clear();
+                    readingMessage = true;
+                }
+                else if (ch == ';' && readingMessage)
+                {
+                    readingMessage = false;
+                    ProcessMessage(serialBuffer.ToString());
+                }
+                else if (readingMessage)
+                {
+                    serialBuffer.Append(ch);
                 }
             }
-            catch (System.Exception e)
-            {
-                Debug.LogWarning(e.Message);
-            }
+        }
+        catch (System.TimeoutException) { /* ignore */ }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning("Serial Read Error: " + e.Message);
         }
     }
 
-    public static float Map(float analogValue, float analogMin, float analogMax, float rotationalMin, float rotationalMax)
+    public static float Map(float v, float inMin, float inMax, float outMin, float outMax)
     {
-        return (analogValue - analogMin) * (rotationalMax - rotationalMin) / (analogMax - analogMin) + rotationalMin;
+        return (v - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
     }
 
     void ProcessMessage(string message)
     {
+        // Expect 5 comma-separated analogs: thumb,index,middle,ring,pinky (0..1023)
         string[] datas = message.Split(',');
-        float thumbread = 0, indexread = 0, middleread = 0, ringread = 0, pinkyread = 0;
-        float mappedThumbRead = 0, mappedIndexRead = 0, mappedMiddleRead = 0, mappedRingRead = 0, mappedPinkyRead = 0;
+        if (datas.Length < 5) return;
 
-        if (datas.Length >= 5)
+        // Safe parse with invariant culture
+        if (!TryParseFloat(datas[0], out float thumbRead)) return;
+        if (!TryParseFloat(datas[1], out float indexRead)) return;
+        if (!TryParseFloat(datas[2], out float middleRead)) return;
+        if (!TryParseFloat(datas[3], out float ringRead)) return;
+        if (!TryParseFloat(datas[4], out float pinkyRead)) return;
+
+        float mappedThumb = Map(thumbRead, 0, 1023, 0, 90) * sensitivity;
+        float mappedIndex = Map(indexRead, 0, 1023, 0, 90) * sensitivity;
+        float mappedMiddle = Map(middleRead, 0, 1023, 0, 90) * sensitivity;
+        float mappedRing = Map(ringRead, 0, 1023, 0, 90) * sensitivity;
+        float mappedPinky = Map(pinkyRead, 0, 1023, 0, 90) * sensitivity;
+
+        // Apply rotations (X-axis) – keep Y/Z from current transforms
+        if (mappedIndex >= 2f)
         {
-            thumbread = float.Parse(datas[0]);
-            mappedThumbRead = Map(thumbread, 0, 1023, 0, 90);
-
-            indexread = float.Parse(datas[1]);
-            mappedIndexRead = Map(indexread, 0, 1023, 0, 90);
-
-            middleread = float.Parse(datas[2]);
-            mappedMiddleRead = Map(middleread, 0, 1023, 0, 90);
-
-            ringread = float.Parse(datas[3]);
-            mappedRingRead = Map(ringread, 0, 1023, 0, 90);
-
-            pinkyread = float.Parse(datas[4]);
-            mappedPinkyRead = Map(pinkyread, 0, 1023, 0, 90);
+            Vector3 r = index.transform.eulerAngles;
+            index.transform.rotation = Quaternion.Euler(mappedIndex, r.y, r.z);
+            indexTip.transform.rotation = Quaternion.Euler(mappedIndex * 2, r.y, r.z);
         }
 
-        // Apply serial values to finger bones
-        index2.localRotation = Quaternion.Euler(mappedIndexRead, 0, 0);
-        index3.localRotation = Quaternion.Euler(mappedIndexRead, 0, 0);
+        if (mappedThumb >= 2f)
+        {
+            Vector3 r = thumb.transform.eulerAngles;
+            thumb.transform.rotation = Quaternion.Euler(mappedThumb, r.y, r.z);
+            thumbTip.transform.rotation = Quaternion.Euler(mappedThumb * 2, r.y, r.z);
+        }
 
-        // Thumb has multi-axis rotation
-        thumb1.localRotation = Quaternion.Euler(mappedThumbRead, 0, 0);
-        thumb2.localRotation = Quaternion.Euler(0, 0, mappedThumbRead);
+        if (mappedMiddle >= 2f)
+        {
+            Vector3 r = middle.transform.eulerAngles;
+            middle.transform.rotation = Quaternion.Euler(mappedMiddle, r.y, r.z);
+            middleTip.transform.rotation = Quaternion.Euler(mappedMiddle * 2, r.y, r.z);
+        }
 
-        middle2.localRotation = Quaternion.Euler(mappedMiddleRead, 0, 0);
-        middle3.localRotation = Quaternion.Euler(mappedMiddleRead, 0, 0);
+        if (mappedRing >= 2f)
+        {
+            Vector3 r = ring.transform.eulerAngles;
+            ring.transform.rotation = Quaternion.Euler(mappedRing, r.y, r.z);
+            ringTip.transform.rotation = Quaternion.Euler(mappedRing * 2, r.y, r.z);
+        }
 
-        ring2.localRotation = Quaternion.Euler(mappedRingRead, 0, 0);
-        ring3.localRotation = Quaternion.Euler(mappedRingRead, 0, 0);
+        if (mappedPinky >= 2f)
+        {
+            Vector3 r = pinky.transform.eulerAngles; // FIX: use pinky, not index
+            pinky.transform.rotation = Quaternion.Euler(mappedPinky, r.y, r.z);
+            pinkyTip.transform.rotation = Quaternion.Euler(mappedPinky * 2, r.y, r.z);
+        }
 
-        little2.localRotation = Quaternion.Euler(mappedPinkyRead, 0, 0);
-        little3.localRotation = Quaternion.Euler(mappedPinkyRead, 0, 0);
+        // Compute brightness from index angle (0..90 -> 0..255)
+        // Compute brightness from index angle (0..90 -> 0..255)
+        float actualAngleIndex = Mathf.Abs(index.transform.eulerAngles.x) % 360f;
+        float indexBrightnessF = Mathf.Clamp((actualAngleIndex / 90f) * 255f, 0f, 255f);
+        int indexBrightness = Mathf.RoundToInt(indexBrightnessF);
+
+        // Compute a second value from the thumb angle (0..90 -> 0..255)
+        float actualAngleThumb = Mathf.Abs(thumb.transform.eulerAngles.x) % 360f;
+        float thumbValueF = Mathf.Clamp((actualAngleThumb / 90f) * 255f, 0f, 255f);
+        int thumbValue = Mathf.RoundToInt(thumbValueF);
+
+
+        // Throttle writes
+        // Throttle writes
+        if (Time.unscaledTime - lastSendTime >= minSendInterval)
+        {
+            string frame = "#"
+                + indexBrightness.ToString(CultureInfo.InvariantCulture)
+                + ","
+                + thumbValue.ToString(CultureInfo.InvariantCulture)
+                + ";";
+            try
+            {
+                data_stream.Write(frame); // Arduino (bridge) forwards this over BT
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning("Serial Write Error: " + e.Message);
+            }
+            lastSendTime = Time.unscaledTime;
+        }
+
+        // Optional debug
+        Debug.Log($"RX: {message}  TX: #{indexBrightness},{thumbValue};");
     }
-
-    private void OnApplicationQuit()
+    static bool TryParseFloat(string s, out float value)
     {
-        if (data_stream.IsOpen)
+        return float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+    }
+
+    void OnApplicationQuit()
+    {
+        if (data_stream != null && data_stream.IsOpen)
         {
-            data_stream.Close();
+            try { data_stream.Close(); } catch { /* ignore */ }
         }
     }
 
-    // ------------------ Sim Mode Methods ------------------
+    /*// ------------------ Sim Mode Methods ------------------
 
     void UpdateSimulatedFingers()
     {
@@ -215,5 +258,5 @@ public class serial_data : MonoBehaviour
         // Pinky finger
         little2.localRotation = Quaternion.Euler(simPinky, 0, 0);
         little3.localRotation = Quaternion.Euler(simPinky, 0, 0);
-    }
+    }*/
 }
